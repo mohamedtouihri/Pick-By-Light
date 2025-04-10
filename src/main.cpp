@@ -337,12 +337,12 @@ void handleRoot() {
     .on { background-color: var(--primary); }
     .off { background-color: var(--danger); }
     .warning { background-color: var(--warning); }
+    .counter0 { background-color: var(--counter0); }  
     .info { background-color: var(--info); } /* Utilisé pour l'état Blue */
     .waiting { 
       background-color: var(--waiting);
       animation: pulse 1.5s infinite ease-in-out;
     }
-    .counter0 { background-color: var(--counter0); }  
   </style>
 </head>
 <body>
@@ -407,7 +407,7 @@ void handleRoot() {
           displayText = 'OFF';
         }
       } else if (id.startsWith('counter')) {
-        statusClass = value.includes("stocke") ? 'warning' : 'counter0';
+        statusClass = value.includes("produit") ? 'warning' : 'counter0';
         symbol = '';
         displayText = value;
       }
@@ -418,7 +418,7 @@ void handleRoot() {
 
   function updateAlertMessages(data) {
     const alert = document.getElementById('alert-message');
-    if (data && (data.counter1.includes("stocke") || data.counter2.includes("stocke") || data.counter3.includes("stocke"))) {
+    if (data && (data.counter1.includes("produit") || data.counter2.includes("produit") || data.counter3.includes("produit"))) {
       alert.style.display = 'block';
     } else {
       alert.style.display = 'none';
