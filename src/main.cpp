@@ -1,612 +1,389 @@
-#include <Arduino.h>
-#include <TM1637Display.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <TM1637Display.h> // تضمين مكتبة TM1637
 
-// --- Configuration WiFi ---
+// بيانات شبكة WiFi
 #define WIFI_SSID "Wokwi-GUEST"
 #define WIFI_PASSWORD ""
 #define WIFI_CHANNEL 6
 
-// --- Définition des capteurs PIR ---
-#define PIR1_PIN 34
-#define PIR2_PIN 19
-#define PIR3_PIN 0
+// تعريف أطراف LED RGB (R, G, B)
+const int LEDS[3][3] = {
+    {12, 13, 14}, // LED1
+    {23, 22, 21}, // LED2
+    {25, 26, 27}  // LED3
+};
 
-// --- Bouton et buzzer ---
-#define BUTTON_PIN 18
-#define BUZZER_PIN 2
+// أطراف حساسات PIR
+const int PIR_PINS[3] = {34, 19, 0};
+// طرف الصفارة
+const int BUZZER_PIN = 18;
 
-// --- Définition des LEDs des 3 stations ---
-// Station 1
-#define LED1_RED 12
-#define LED1_GREEN 13
-#define LED1_BLUE 14
-// Station 2
-#define LED2_RED 23
-#define LED2_GREEN 22
-#define LED2_BLUE 21
-// Station 3
-#define LED3_RED 25
-#define LED3_GREEN 26
-#define LED3_BLUE 27
+// منافذ شاشات TM1637
+const int CLK_PINS[3] = {33, 5, 4};
+const int DIO_PINS[3] = {15, 17, 16};
 
-// --- Définition des broches pour les affichages TM1637 ---
-#define CLK1 33
-#define DIO1 15
-#define CLK2 5
-#define DIO2 17
-#define CLK3 4
-#define DIO3 16
+// إنشاء كائنات العرض
+TM1637Display displays[3] = {
+    TM1637Display(CLK_PINS[0], DIO_PINS[0]),
+    TM1637Display(CLK_PINS[1], DIO_PINS[1]),
+    TM1637Display(CLK_PINS[2], DIO_PINS[2])
+};
 
-// --- Création des objets d'affichage ---
-TM1637Display display1(CLK1, DIO1);
-TM1637Display display2(CLK2, DIO2);
-TM1637Display display3(CLK3, DIO3);
+// القيم الابتدائية للعدادات
+int displayValues[3] = {15, 15, 15};
 
-// --- Variables pour les compteurs affichés ---
-int counter1 = 11;
-int counter2 = 11;
-int counter3 = 11;
+// تتبع حالات
+bool ledStates[3] = {false, false, false};         // حالة LED أخضر
+bool pirLatched[3] = {false, false, false};        // latch لحالة PIR
+bool handledEvent[3] = {false, false, false};      // لمنع التكرار لكل latch
+bool buzzerState = false;                          // حالة البزر
+unsigned long buzzerEndTime = 0;                   // وقت انتهاء تشغيل البزر
 
-// --- Variables pour éviter les déclenchements multiples ---
-bool triggered1 = false;
-bool triggered2 = false;
-bool triggered3 = false;
-
-unsigned long buzzer_disabled_until = 0;
-
-// --- Variables d'état pour l'interface web ---
-String station1Status = "OFF"; // état de la LED station 1 ("Red", "Green", "Blue" ou "OFF")
-String station2Status = "OFF";
-String station3Status = "OFF";
-String buzzerState = "OFF"; // "ON" ou "OFF"
-
-// --- Instance du serveur web ---
 WebServer server(80);
 
-// --- Variables pour le clignotement ---
-unsigned long previousBlinkMillis = 0;
-bool blinkState = false;
-const unsigned long blinkInterval = 500; // 500 ms
-
-// --- Fonctions d'affichage TM1637 ---
-void update_display()
-{
-  // Pour chaque compteur, si la valeur est 10, on affiche en clignotant,
-  // sinon on affiche la valeur normalement.
-  if (counter1 == 10)
-  {
-    if (blinkState)
-      display1.showNumberDec(10, false);
-    else
-      display1.clear();
-  }
-  else
-  {
-    display1.showNumberDec(counter1, true);
-  }
-
-  if (counter2 == 10)
-  {
-    if (blinkState)
-      display2.showNumberDec(10, false);
-    else
-      display2.clear();
-  }
-  else
-  {
-    display2.showNumberDec(counter2, true);
-  }
-
-  if (counter3 == 10)
-  {
-    if (blinkState)
-      display3.showNumberDec(10, false);
-    else
-      display3.clear();
-  }
-  else
-  {
-    display3.showNumberDec(counter3, true);
-  }
-}
-
-// --- Fonctions pour gérer les LEDs et le buzzer ---
-void turn_off_led(int red, int green, int blue)
-{
-  digitalWrite(red, LOW);
-  digitalWrite(green, LOW);
-  digitalWrite(blue, LOW);
-}
-
-void turn_off_all_leds()
-{
-  turn_off_led(LED1_RED, LED1_GREEN, LED1_BLUE);
-  turn_off_led(LED2_RED, LED2_GREEN, LED2_BLUE);
-  turn_off_led(LED3_RED, LED3_GREEN, LED3_BLUE);
-}
-
-void buzzer_on()
-{
-  ledcAttachPin(BUZZER_PIN, 0);
-  ledcWriteTone(0, 1000);
-  buzzerState = "ON";
-}
-
-void buzzer_off()
-{
-  ledcDetachPin(BUZZER_PIN);
-  buzzerState = "OFF";
-}
-
-/*
- * La fonction set_led_status gère la couleur de la LED associée au capteur PIR.
- * Si le capteur est actif et que la LED bleue est allumée, la LED passe au vert et le compteur décrémente.
- * Sinon, la LED passe au rouge et le buzzer s'active.
- */
-void set_led_status(int sensor_id, int pir_pin, int red, int green, int blue)
-{
-  String *currentStatus;
-  bool *triggered;
-  if (sensor_id == 1)
-  {
-    currentStatus = &station1Status;
-    triggered = &triggered1;
-  }
-  else if (sensor_id == 2)
-  {
-    currentStatus = &station2Status;
-    triggered = &triggered2;
-  }
-  else
-  {
-    currentStatus = &station3Status;
-    triggered = &triggered3;
-  }
-
-  if (digitalRead(pir_pin) == HIGH)
-  {
-    if (digitalRead(blue) == HIGH)
-    { // Si la LED bleue est allumée
-      digitalWrite(green, HIGH);
-      digitalWrite(red, LOW);
-      *currentStatus = "Green";
-
-      if (!(*triggered))
-      {
-        if (sensor_id == 1 && counter1 > 0)
-          counter1--;
-        else if (sensor_id == 2 && counter2 > 0)
-          counter2--;
-        else if (sensor_id == 3 && counter3 > 0)
-          counter3--;
-        *triggered = true;
-      }
+// إعادة تهيئة الحالة عند الضغط على زر الاختيار العشوائي
+void allLEDsOff() {
+    for (int i = 0; i < 3; i++) {
+        for (int c = 0; c < 3; c++) digitalWrite(LEDS[i][c], LOW);
+        ledStates[i] = false;
+        pirLatched[i] = false;
+        handledEvent[i] = false;
     }
-    else
-    {
-      digitalWrite(red, HIGH);
-      digitalWrite(green, LOW);
-      *currentStatus = "Red";
-
-      if (millis() >= buzzer_disabled_until)
-      {
-        buzzer_on();
-        buzzer_disabled_until = millis() + 5000;
-        delay(700);
-        buzzer_off();
-      }
-    }
-    update_display();
-  }
-  else
-  {
-    // Ne pas écraser la valeur "Blue" qui aurait été définie par le bouton
-    if (*currentStatus != "Blue")
-      *currentStatus = "OFF";
-    *triggered = false;
-  }
 }
 
-// --- Fonctions du serveur web ---
-//
-// La page HTML affiche un tableau avec l'état en temps réel.
-// Si le compteur vaut 10, on affiche le message "stocke a bien tot experie".
+// تفعيل LED أخضر لمحطة محددة وإظهار العداد
+void turnGreen(int idx) {
+    digitalWrite(LEDS[idx][0], LOW);
+    digitalWrite(LEDS[idx][1], HIGH);
+    digitalWrite(LEDS[idx][2], LOW);
+    ledStates[idx] = true;
+    displays[idx].showNumberDec(displayValues[idx]);
+}
+
+// صفحة HTML رئيسية مع التصميم والتفاعل
 void handleRoot() {
-  String html = R"(
+    String html = R"rawliteral(
 <!DOCTYPE html>
 <html lang="fr">
+
 <head>
-  <meta charset="UTF-8">
-  <title>Statut des Stations - Temps Réel</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pick by Light - SEBN TN & Mercedes-Benz</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" rel="stylesheet">
   <style>
-    :root {
-      --primary: #4CAF50;
-      --danger: #f44336;
-      --warning: #ff9800;
-      --info: #2196F3; /* Bleu pour l'état Blue */
-      --bg: #f4f7fa;
-      --text: #333;
-      --card: #fff;
-      --border: #ddd;
-      --waiting: #9e9e9e;
-      --counter0:rgb(0, 0, 0);
-    }
-
     body {
-      font-family: 'Segoe UI', sans-serif;
-      background-color: var(--bg);
-      margin: 0;
-      padding: 20px;
-      color: var(--text);
-    }
-
-    h1 {
-      text-align: center;
-      color: var(--primary);
-      margin-bottom: 20px;
-    }
-
-    #alert-message {
-      display: block;
-      background: var(--warning);
-      padding: 12px;
-      margin-bottom: 20px;
-      border-radius: 8px;
-      font-weight: bold;
-      color: white;
-      text-align: center;
-    }
-
-    .container {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-      gap: 20px;
-      max-width: 1000px;
-      margin: auto;
-    }
-
-    .card {
-      background-color: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      box-shadow: 0 4px 8px rgba(0,0,0,0.05);
-      padding: 20px;
-      transition: transform 0.2s;
-    }
-
-    @keyframes pulse {
-      0% { opacity: 0.3; transform: scale(0.95); }
-      50% { opacity: 1; transform: scale(1.05); }
-      100% { opacity: 0.3; transform: scale(0.95); }
-    }
-
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-
-    .loading-overlay {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: rgba(255, 255, 255, 0.9);
-      z-index: 1000;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      font-size: 1.8em;
-      font-weight: bold;
-      color: var(--primary);
-      animation: pulse 2s infinite ease-in-out;
-    }
-
-    .loading-overlay .spinner {
-      font-size: 3em;
-      animation: spin 1.5s linear infinite;
-      margin-bottom: 0.5em;
-    }
-
-    .card:hover {
-      transform: translateY(-4px);
+      font-size: 1.1rem;
     }
 
     .label {
       font-weight: bold;
-      margin-bottom: 10px;
-      font-size: 1.1em;
+      color: #1f2937;
     }
 
     .value {
-      font-size: 1.5em;
-    }
-
-    .status {
-      padding: 6px 12px;
-      border-radius: 8px;
-      color: white;
+      padding: 0.5rem 1rem;
+      border-radius: 0.5rem;
       font-weight: bold;
       display: inline-block;
+      min-width: 100px;
+      text-align: center;
     }
 
-    .on { background-color: var(--primary); }
-    .off { background-color: var(--danger); }
-    .warning { background-color: var(--warning); }
-    .counter0 { background-color: var(--counter0); }  
-    .info { background-color: var(--info); } /* Utilisé pour l'état Blue */
-    .waiting { 
-      background-color: var(--waiting);
-      animation: pulse 1.5s infinite ease-in-out;
+    /* Colors & States */
+    .led-on {
+      background-color: #bbf7d0;
+      color: #166534;
+    }
+
+    .led-off {
+      background-color: #e5e7eb;
+      color: #4b5563;
+    }
+
+    .led-error {
+      background-color: #fecaca;
+      color: #991b1b;
+    }
+
+    .pir-active {
+      background-color: #bfdbfe;
+      color: #1d4ed8;
+    }
+
+    .pir-inactive {
+      background-color: #d1d5db;
+      color: #374151;
+    }
+
+    .counter-style {
+      background-color: #fef3c7;
+      color: #92400e;
+    }
+
+    .buzzer-on {
+      background-color: #fcd34d;
+      color: #78350f;
+    }
+
+    .buzzer-off {
+      background-color: #e5e7eb;
+      color: #4b5563;
     }
   </style>
 </head>
-<body>
-  <h1>Statut des Stations en Temps Réel</h1>
-  <div class="loading-overlay" id="loading">
-    <div class="spinner">⏳</div>
-    <div style="animation: pulse 1.5s infinite ease-in-out;">Chargement des données...</div>
-  </div>
-  <div id="alert-message">⚠️ Un ou plusieurs stocks sont épuisés. Veuillez réapprovisionner !</div>
-  <div class="container">
-    <div class="card"><div class="label">Station 1 (LED)</div><div class="value" id="station1"><span class="status info">⏳ En attente...</span></div></div>
-    <div class="card"><div class="label">Compteur 1</div><div class="value" id="counter1"><span class="status waiting">⏳ En attente...</span></div></div>
-    <div class="card"><div class="label">PIR 1</div><div class="value" id="pir1"><span class="status off">⏳ En attente...</span></div></div>
-    <div class="card"><div class="label">Station 2 (LED)</div><div class="value" id="station2"><span class="status waiting">⏳ En attente...</span></div></div>
-    <div class="card"><div class="label">Compteur 2</div><div class="value" id="counter2"><span class="status waiting">⏳ En attente...</span></div></div>
-    <div class="card"><div class="label">PIR 2</div><div class="value" id="pir2"><span class="status off">⏳ En attente...</span></div></div>
-    <div class="card"><div class="label">Station 3 (LED)</div><div class="value" id="station3"><span class="status info">⏳ En attente...</span></div></div>
-    <div class="card"><div class="label">Compteur 3</div><div class="value" id="counter3"><span class="status waiting">⏳ En attente...</span></div></div>
-    <div class="card"><div class="label">PIR 3</div><div class="value" id="pir3"><span class="status off">⏳ En attente...</span></div></div>
-    <div class="card"><div class="label">Buzzer</div><div class="value" id="buzzer"><span class="status off">⏳ En attente...</span></div></div>
-  </div>
- <script>
-  function updateStatus(id, value) {
-    const el = document.getElementById(id);
-    let statusClass = 'waiting';
-    let symbol = '⏳';
-    let displayText = 'En attente...';
 
-    if (value && value !== 'En attente...') {
-      if (id.startsWith('station')) {
-        if (value === 'Green') {
-          statusClass = 'on';
-          symbol = '✅';
-          displayText = 'Green';
-        } else if (value === 'Red') {
-          statusClass = 'off';
-          symbol = '❌';
-          displayText = 'Red';
-        } else if (value === 'Blue') {
-          statusClass = 'info'; // Utilise la classe info (bleue)
-          symbol = '🔵';
-          displayText = 'Blue';
-        }
-      } else if (id.startsWith('pir')) {
-        if (value === 'Motion') {
-          statusClass = 'on';
-          symbol = '👣';
-          displayText = 'Motion';
-        } else {
-          statusClass = 'off';
-          symbol = '🚫';
-          displayText = 'No Motion';
-        }
-      } else if (id === 'buzzer') {
-        if (value === 'ON') {
-          statusClass = 'on';
-          symbol = '🔔';
-          displayText = 'ON';
-        } else {
-          statusClass = 'off';
-          symbol = '🔕';
-          displayText = 'OFF';
-        }
-      } else if (id.startsWith('counter')) {
-        statusClass = value.includes("produit") ? 'warning' : 'counter0';
-        symbol = '';
-        displayText = value;
-      }
+<body class="bg-gray-100 font-sans min-h-screen flex flex-col">
+
+  <!-- Header -->
+  <header class="bg-white shadow p-6 flex flex-col sm:flex-row justify-between items-center text-xl">
+    <div class="flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-10">
+      <div class="flex items-center space-x-2">
+        <img
+          src="https://upload.wikimedia.org/wikipedia/commons/thumb/f/f4/Sumitomo_Electric_Industries_logo.svg/512px-Sumitomo_Electric_Industries_logo.svg.png"
+          alt="SEBN TN Logo" class="h-12 sm:h-14">
+      </div>
+      <div class="flex flex-col sm:flex-row items-center sm:items-center space-y-4 sm:space-y-0 sm:space-x-6">
+
+        <div class="flex items-center space-x-3">
+          <img
+            src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/90/Mercedes-Logo.svg/512px-Mercedes-Logo.svg.png"
+            alt="Mercedes-Benz Logo"
+            class="h-12 sm:h-14"
+          />
+          <span class="font-bold text-gray-700 text-xl sm:text-2xl">
+            Mercedes-Benz
+          </span>
+        </div>
+      
+        <span class="hidden sm:inline text-blue-600 font-semibold text-lg sm:text-xl whitespace-nowrap">
+          Pick by Light - SEBN TN
+        </span>
+      
+        <span class="block sm:hidden text-blue-600 font-semibold text-lg text-center mt-2">
+          Pick by Light - SEBN TN
+        </span>
+      
+      </div>
+      
+      </div>
+      <button id="startButton" class="mt-4 sm:mt-0 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition
+                   px-6 py-3 text-lg">
+        Démarrer le système
+      </button>
+  </header>
+
+  <!-- Warning Banner -->
+  <div id="warning" class="hidden bg-red-600 text-white p-8 text-center font-bold mx-8 mb-12 rounded-lg text-2xl">
+    ⚠️ Attention : produit épuisé ! Veuillez recharger avant de continuer.
+  </div>
+
+  <!-- Main Stations -->
+  <main class="flex-grow px-8 pt-8 pb-6 flex flex-col justify-start items-center">
+  <div class="max-w-10xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-6 h-full mt-8">
+
+    <!-- Station 1 -->
+    <div class="station bg-white p-14 space-y-6 rounded-2xl shadow-2xl text-lg min-h-[320px]" id="station1">
+      <h2 class="font-bold text-3xl">Station 1</h2>
+      <p><span class="label"><i class="icon fas fa-lightbulb"></i> LED :</span>
+        <span class="led-state value led-off">⏳ En attente</span>
+      </p>
+      <p><span class="label"><i class="icon fas fa-eye"></i> PIR :</span>
+        <span class="pir-state value pir-inactive">🚫 Inactif</span>
+      </p>
+      <p><span class="label"><i class="icon fas fa-cogs"></i> Compteur :</span>
+        <span class="counter value counter-style">0</span>
+      </p>
+    </div>
+
+    <!-- Station 2 -->
+    <div class="station bg-white p-14 space-y-6 rounded-2xl shadow-2xl text-lg min-h-[320px]" id="station2">
+      <h2 class="font-bold text-3xl">Station 2</h2>
+      <p><span class="label"><i class="icon fas fa-lightbulb"></i> LED :</span>
+        <span class="led-state value led-off">⏳ En attente</span>
+      </p>
+      <p><span class="label"><i class="icon fas fa-eye"></i> PIR :</span>
+        <span class="pir-state value pir-inactive">🚫 Inactif</span>
+      </p>
+      <p><span class="label"><i class="icon fas fa-cogs"></i> Compteur :</span>
+        <span class="counter value counter-style">0</span>
+      </p>
+    </div>
+
+    <!-- Station 3 -->
+    <div class="station bg-white p-14 space-y-6 rounded-2xl shadow-2xl text-lg min-h-[320px]" id="station3">
+      <h2 class="font-bold text-3xl">Station 3</h2>
+      <p><span class="label"><i class="icon fas fa-lightbulb"></i> LED :</span>
+        <span class="led-state value led-off">⏳ En attente</span>
+      </p>
+      <p><span class="label"><i class="icon fas fa-eye"></i> PIR :</span>
+        <span class="pir-state value pir-inactive">🚫 Inactif</span>
+      </p>
+      <p><span class="label"><i class="icon fas fa-cogs"></i> Compteur :</span>
+        <span class="counter value counter-style">0</span>
+      </p>
+    </div>
+
+  </div>
+</main>
+
+  <!-- Buzzer Footer -->
+  <footer class="bg-white shadow mt-auto py-6">
+    <div class="max-w-7xl mx-auto px-8 text-center text-xl">
+      <p><span class="label"><i class="icon fas fa-bell"></i> État du Buzzer :</span>
+        <span id="buzzerState" class="value buzzer-off">🔕 Éteint</span>
+      </p>
+    </div>
+  </footer>
+
+  <!-- Script d'interaction -->
+  <script>
+    function randomizeLEDs() {
+      fetch('/randomize')
+        .then(res => { if (!res.ok) throw new Error('Erreur réseau'); return res.text(); })
+        .then(msg => console.log('Randomize:', msg))
+        .catch(err => console.error(err));
     }
 
-    el.innerHTML = `<span class="status ${statusClass}">${symbol} ${displayText}</span>`;
-  }
+    function updateStation(i, data) {
+      const ledVal = data['LED' + i];
+      const ledEl = document.querySelector('#station' + i + ' .led-state');
+      ledEl.className = 'led-state value ' +
+        (ledVal === 'Green' ? 'led-on' :
+          ledVal === 'Red' ? 'led-error' : 'led-off');
+      ledEl.textContent = ledVal === 'Green' ? '✅ Vert' : ledVal === 'Red' ? '❌ Rouge' : '⏳ En attente';
 
-  function updateAlertMessages(data) {
-    const alert = document.getElementById('alert-message');
-    if (data && (data.counter1.includes("produit") || data.counter2.includes("produit") || data.counter3.includes("produit"))) {
-      alert.style.display = 'block';
-    } else {
-      alert.style.display = 'none';
+      const pirVal = data['PIR' + i];
+      const pirEl = document.querySelector('#station' + i + ' .pir-state');
+      pirEl.className = 'pir-state value ' + (pirVal === 'DETECTED' ? 'pir-active' : 'pir-inactive');
+      pirEl.textContent = pirVal === 'DETECTED' ? '👣 Mouvement' : '🚫 Inactif';
+
+      const cntVal = data['DISPLAY' + i];
+      const cntEl = document.querySelector('#station' + i + ' .counter');
+      cntEl.textContent = cntVal;
     }
-  }
 
-  function hideLoading() {
-    document.getElementById('loading').style.display = 'none';
-  }
+    function updateBuzzer(data) {
+      const buzzEl = document.getElementById('buzzerState');
+      buzzEl.className = 'value ' + (data.BUZZER === 'ON' ? 'buzzer-on' : 'buzzer-off');
+      buzzEl.textContent = data.BUZZER === 'ON' ? '🔔 Activé' : '🔕 Éteint';
+    }
 
-  // Initialiser avec les données
-  document.addEventListener('DOMContentLoaded', function() {
-    updateStatus('station1', 'Blue');
-    updateStatus('station3', 'Blue');
-    updateStatus('pir1', 'No Motion');
-    updateStatus('pir2', 'No Motion');
-    updateStatus('pir3', 'No Motion');
-    updateStatus('buzzer', 'OFF');
-    
-    setTimeout(hideLoading, 1000);
-  });
+    function toggleWarning(show) {
+      const warnEl = document.getElementById('warning');
+      if (show) warnEl.classList.remove('hidden'); else warnEl.classList.add('hidden');
+    }
 
-  setInterval(() => {
-    fetch('/status')
-      .then(res => res.json())
-      .then(data => {
-        updateStatus('station1', data.station1);
-        updateStatus('counter1', data.counter1);
-        updateStatus('station2', data.station2);
-        updateStatus('counter2', data.counter2);
-        updateStatus('station3', data.station3);
-        updateStatus('counter3', data.counter3);
-        updateStatus('pir1', data.pir1);
-        updateStatus('pir2', data.pir2);
-        updateStatus('pir3', data.pir3);
-        updateStatus('buzzer', data.buzzer);
-        updateAlertMessages(data);
-        hideLoading();
-      })
-      .catch(error => {
-        console.error('Error fetching data:', error);
-      });
-  }, 1000);
-</script>
+    function fetchStatus() {
+      fetch('/status')
+        .then(res => res.json())
+        .then(data => {
+          [1, 2, 3].forEach(i => updateStation(i, data));
+          updateBuzzer(data);
+          toggleWarning(data.PRODUCT_DEPLETED === true);
+        })
+        .catch(err => console.error('Status erreur:', err));
+    }
+
+    document.getElementById('startButton').addEventListener('click', randomizeLEDs);
+    setInterval(fetchStatus, 1000);
+    fetchStatus();
+  </script>
 </body>
+
 </html>
-)";
-
-  // Si le compteur vaut 10, on affiche le message spécifique
-  String counter1Str = (counter1 >= 10) ? String(counter1) + " - Le produit est presque achevé" : String(counter1);
-  String counter2Str = (counter2 >= 10) ? String(counter2) + " - Le produit est presque achevé" : String(counter2);
-  String counter3Str = (counter3 >= 10) ? String(counter3) + " - Le produit est presque achevé" : String(counter3);
-
-  html.replace("%STATION1%", station1Status);
-  html.replace("%STATION2%", station2Status);
-  html.replace("%STATION3%", station3Status);
-  html.replace("%COUNTER1%", counter1Str);
-  html.replace("%COUNTER2%", counter2Str);
-  html.replace("%COUNTER3%", counter3Str);
-  html.replace("%PIR1%", digitalRead(PIR1_PIN) == HIGH ? "Motion" : "No Motion");
-  html.replace("%PIR2%", digitalRead(PIR2_PIN) == HIGH ? "Motion" : "No Motion");
-  html.replace("%PIR3%", digitalRead(PIR3_PIN) == HIGH ? "Motion" : "No Motion");
-  html.replace("%BUZZER%", buzzerState);
-  server.send(200, "text/html", html);
+)rawliteral";
+    server.send(200, "text/html", html);
 }
 
-void handleStatus()
-{
-  String json = "{";
-  json += "\"station1\":\"" + station1Status + "\",";
-  json += "\"station2\":\"" + station2Status + "\",";
-  json += "\"station3\":\"" + station3Status + "\",";
-
-  String counter1Str = (counter1 <= 10) ? String(counter1) + " - Le produit est presque achevé" : String(counter1);
-  String counter2Str = (counter2 <= 10) ? String(counter2) + " - Le produit est presque achevé" : String(counter2);
-  String counter3Str = (counter3 <= 10) ? String(counter3) + " - Le produit est presque achevé" : String(counter3);
-
-  json += "\"counter1\":\"" + counter1Str + "\",";
-  json += "\"counter2\":\"" + counter2Str + "\",";
-  json += "\"counter3\":\"" + counter3Str + "\",";
-  json += "\"pir1\":\"" + String(digitalRead(PIR1_PIN) == HIGH ? "Motion" : "No Motion") + "\",";
-  json += "\"pir2\":\"" + String(digitalRead(PIR2_PIN) == HIGH ? "Motion" : "No Motion") + "\",";
-  json += "\"pir3\":\"" + String(digitalRead(PIR3_PIN) == HIGH ? "Motion" : "No Motion") + "\",";
-  json += "\"buzzer\":\"" + buzzerState + "\"";
-  json += "}";
-  server.send(200, "application/json", json);
-}
-
-void setup()
-{
-  Serial.begin(115200);
-  randomSeed(analogRead(0));
-
-  // Initialisation des capteurs et composants
-  pinMode(PIR1_PIN, INPUT);
-  pinMode(PIR2_PIN, INPUT);
-  pinMode(PIR3_PIN, INPUT);
-
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(BUZZER_PIN, OUTPUT);
-
-  pinMode(LED1_RED, OUTPUT);
-  pinMode(LED1_GREEN, OUTPUT);
-  pinMode(LED1_BLUE, OUTPUT);
-
-  pinMode(LED2_RED, OUTPUT);
-  pinMode(LED2_GREEN, OUTPUT);
-  pinMode(LED2_BLUE, OUTPUT);
-
-  pinMode(LED3_RED, OUTPUT);
-  pinMode(LED3_GREEN, OUTPUT);
-  pinMode(LED3_BLUE, OUTPUT);
-
-  display1.setBrightness(0x0F);
-  display2.setBrightness(0x0F);
-  display3.setBrightness(0x0F);
-
-  turn_off_all_leds();
-  update_display();
-
-  // --- Connexion WiFi ---
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD, WIFI_CHANNEL);
-  Serial.print("Connexion à ");
-  Serial.print(WIFI_SSID);
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(100);
-    Serial.print(".");
-  }
-  Serial.println(" Connecté !");
-  Serial.print("Adresse IP : ");
-  Serial.println(WiFi.localIP());
-
-  // --- Configuration du serveur web ---
-  server.on("/", handleRoot);
-  server.on("/status", handleStatus);
-  server.begin();
-  Serial.println("Serveur HTTP démarré");
-}
-
-void loop()
-{
-  // Mettre à jour la variable de clignotement
-  if (millis() - previousBlinkMillis >= blinkInterval)
-  {
-    previousBlinkMillis = millis();
-    blinkState = !blinkState;
-    update_display();
-  }
-
-  // Mise à jour de l'état pour chaque station via les capteurs PIR
-  set_led_status(1, PIR1_PIN, LED1_RED, LED1_GREEN, LED1_BLUE);
-  set_led_status(2, PIR2_PIN, LED2_RED, LED2_GREEN, LED2_BLUE);
-  set_led_status(3, PIR3_PIN, LED3_RED, LED3_GREEN, LED3_BLUE);
-
-  // Gestion du bouton : allumer aléatoirement 2 LEDs en bleu
-  if (digitalRead(BUTTON_PIN) == LOW)
-  {
-    turn_off_all_leds();
-    // Réinitialiser les états
-    station1Status = "OFF";
-    station2Status = "OFF";
-    station3Status = "OFF";
-
-    int choices[] = {LED1_BLUE, LED2_BLUE, LED3_BLUE};
-    int chosen1 = random(0, 3);
-    int chosen2;
-    do
-    {
-      chosen2 = random(0, 3);
-    } while (chosen2 == chosen1);
-
-    digitalWrite(choices[chosen1], HIGH);
-    digitalWrite(choices[chosen2], HIGH);
-
-    if (chosen1 == 0 || chosen2 == 0)
-      station1Status = "Blue";
-    if (chosen1 == 1 || chosen2 == 1)
-      station2Status = "Blue";
-    if (chosen1 == 2 || chosen2 == 2)
-      station3Status = "Blue";
-
-    while (digitalRead(BUTTON_PIN) == LOW)
-    {
-      delay(10);
+// إرسال الحالة كـ JSON
+void handleStatus() {
+    String json = "{";
+    for (int i = 0; i < 3; i++) {
+        bool greenOn = digitalRead(LEDS[i][1]) == HIGH;
+        bool redOn   = digitalRead(LEDS[i][0]) == HIGH;
+        String led = greenOn ? "Green" : (redOn ? "Red" : "En attente");
+        String pir = pirLatched[i] ? "DETECTED" : "NONE";
+        String cnt = String(displayValues[i]);
+        if (displayValues[i] <= 10) cnt += " - Le produit est presque achevé";
+        json += "\"LED" + String(i+1) + "\":\"" + led + "\",";
+        json += "\"PIR" + String(i+1) + "\":\"" + pir + "\",";
+        json += "\"DISPLAY" + String(i+1) + "\":\"" + cnt + "\",";
     }
-  }
+    json += "\"BUZZER\":\"" + String(buzzerState ? "ON" : "OFF") + "\"}";
+    server.send(200, "application/json", json);
+}
 
-  server.handleClient();
-  delay(10);
+// اختيار محطتين عشوائيًا
+void handleRandomize() {
+    allLEDsOff();
+    int idxs[3] = {0,1,2};
+    for (int i = 2; i > 0; i--) { int j = random(0, i+1); std::swap(idxs[i], idxs[j]); }
+    turnGreen(idxs[0]);
+    turnGreen(idxs[1]);
+    server.send(200, "text/plain", "LEDs ON: LED" + String(idxs[0]+1) + " & LED" + String(idxs[1]+1));
+}
+
+void setup() {
+    Serial.begin(115200);
+    for (int i = 0; i < 3; i++) {
+        for (int c = 0; c < 3; c++) pinMode(LEDS[i][c], OUTPUT);
+        pinMode(PIR_PINS[i], INPUT);
+        displays[i].setBrightness(7);
+        displays[i].showNumberDec(displayValues[i]);
+        pirLatched[i] = false;
+        handledEvent[i] = false;
+    }
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW);
+    allLEDsOff();
+
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD, WIFI_CHANNEL);
+    Serial.print("Connexion à ");
+    Serial.print(WIFI_SSID);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println("\nConnected!");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+    server.on("/", handleRoot);
+    server.on("/status", handleStatus);
+    server.on("/randomize", handleRandomize);
+    server.begin();
+}
+
+void loop() {
+    unsigned long now = millis();
+    for (int i = 0; i < 3; i++) {
+        bool pir = digitalRead(PIR_PINS[i]) == HIGH;
+        // PIR latch
+        if (pir && !pirLatched[i]) pirLatched[i] = true;
+
+        // decrement once if green & latched
+        if (ledStates[i] && pirLatched[i] && !handledEvent[i]) {
+            displayValues[i]--;
+            displays[i].showNumberDec(displayValues[i]);
+            handledEvent[i] = true;
+        }
+        // red + buzzer once if red condition & latched
+        else if (!ledStates[i] && pirLatched[i] && !handledEvent[i]) {
+            digitalWrite(LEDS[i][0], HIGH);
+            digitalWrite(LEDS[i][1], LOW);
+            digitalWrite(LEDS[i][2], LOW);
+            digitalWrite(BUZZER_PIN, HIGH);
+            buzzerState = true;
+            buzzerEndTime = now + 3000;
+            handledEvent[i] = true;
+        }
+    }
+    // stop buzzer after 3s
+    if (buzzerState && now >= buzzerEndTime) {
+        digitalWrite(BUZZER_PIN, LOW);
+        buzzerState = false;
+    }
+    server.handleClient();
 }
