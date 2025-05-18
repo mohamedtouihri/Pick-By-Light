@@ -69,20 +69,20 @@
 
     <main class="flex-grow px-8 flex flex-col justify-center items-center">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-12 max-w-screen-lg mx-auto">
-            <div class="station bg-white p-6 space-y-7 rounded-lg shadow-md text-lg" id="station1">
-                <h2 class="font-bold text-xl text-center">Station 1</h2>
+            <div class="station bg-white p-10 space-y-10 rounded-lg shadow-md text-lg" id="station1">
+                <h2 class="font-bold text-2xl text-center">Station 1</h2>
                 <p><span class="label"><i class="icon fas fa-lightbulb"></i> LED :</span> <span class="led-state value led-off">⏳ En attente</span></p>
                 <p><span class="label"><i class="icon fas fa-eye"></i> PIR :</span> <span class="pir-state value pir-inactive">🚫 Inactif</span></p>
                 <p><span class="label"><i class="icon fas fa-boxes"></i> Compteur :</span> <span class="counter value counter-style">0</span></p>
             </div>
-            <div class="station bg-white p-6 space-y-7 rounded-lg shadow-md text-lg" id="station2">
-                <h2 class="font-bold text-xl text-center">Station 2</h2>
+            <div class="station bg-white p-10 space-y-10 rounded-lg shadow-md text-align" id="station2">
+                <h2 class="font-bold text-2xl text-center">Station 2</h2>
                 <p><span class="label"><i class="icon fas fa-lightbulb"></i> LED :</span> <span class="led-state value led-off">⏳ En attente</span></p>
                 <p><span class="label"><i class="icon fas fa-eye"></i> PIR :</span> <span class="pir-state value pir-inactive">🚫 Inactif</span></p>
                 <p><span class="label"><i class="icon fas fa-boxes"></i> Compteur :</span> <span class="counter value counter-style">0</span></p>
             </div>
-            <div class="station bg-white p-6 space-y-7 rounded-lg shadow-md text-lg" id="station3">
-                <h2 class="font-bold text-xl text-center">Station 3</h2>
+            <div class="station bg-white p-10 space-y-10 rounded-lg shadow-md text-align" id="station3">
+                <h2 class="font-bold text-2xl text-center">Station 3</h2>
                 <p><span class="label"><i class="icon fas fa-lightbulb"></i> LED :</span> <span class="led-state value led-off">⏳ En attente</span></p>
                 <p><span class="label"><i class="icon fas fa-eye"></i> PIR :</span> <span class="pir-state value pir-inactive">🚫 Inactif</span></p>
                 <p><span class="label"><i class="icon fas fa-boxes"></i> Compteur :</span> <span class="counter value counter-style">0</span></p>
@@ -124,7 +124,7 @@
             cntEl.textContent = cntText; // Display the text as is
 
             // Apply warning style if the text indicates low stock
-            if (cntText.includes('presque achevé')) {
+            if (cntText.includes(10)) {
                 cntEl.classList.remove('counter-style');
                 cntEl.classList.add('counter-warning');
             } else {
@@ -142,14 +142,13 @@
                 warnEl.classList.add('hidden'); // Hide banner if no stations are depleted
             } else {
                 let msg;
-                if (depletedStations.length === 3) {
-                    msg = '⚠️ Attention : toutes les stations sont épuisées ! Veuillez recharger avant de continuer.';
-                } else if (depletedStations.length === 1) {
-                    msg = '⚠️ Attention : ' + depletedStations[0] + ' est épuisée ! Veuillez recharger avant de continuer.';
-                } else { // length is 2
-                     // Join the two station names with " et "
-                    msg = '⚠️ Attention : ' + depletedStations.join(' et ') + ' sont épuisées ! Veuillez recharger avant de continuer.';
-                }
+            if (depletedStations.length === 3) {
+                msg = '⚠️ Attention : Toutes les stations sont presque à court de stock ! Veuillez les réapprovisionner immédiatement.';
+            } else if (depletedStations.length === 1) {
+                msg = '⚠️ Attention : Le stock est presque vide dans ' + depletedStations[0] + ' ! Veuillez les réapprovisionner immédiatement.';
+            } else { // length is 2
+                msg = '⚠️ Attention : Le stock est presque vide dans ' + depletedStations.join(' et ') + ' ! Veuillez les réapprovisionner immédiatement.';
+            }
                 warnEl.textContent = msg; // Set the dynamic message
                 warnEl.classList.remove('hidden'); // Show the banner
             }

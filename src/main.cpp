@@ -33,7 +33,7 @@ TM1637Display displays[3] = {
 };
 
 // القيم الابتدائية للعدادات
-int displayValues[3] = {12, 12, 12}; // يمكن تغيير القيمة الابتدائية هنا
+int displayValues[3] = {11, 11, 11}; // يمكن تغيير القيمة الابتدائية هنا
 
 // تتبع حالات النظام
 bool ledStates[3] = {false, false, false};      // حالة LED أخضر للمحطة (هل يجب أن يكون أخضر؟)
@@ -141,7 +141,7 @@ void handleRoot() {
                 <span class="text-blue-600 font-semibold text-lg sm:text-xl whitespace-nowrap text-center">Pick by Light - SEBN TN</span>
             </div>
         </div>
-        <button id="startButton" class="mt-4 sm:mt-0 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition px-6 py-3 text-lg">Démarrer le système</button>
+        <button id="startButton" class="mt-4 sm:mt-0 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition px-6 py-3 text-lg"><i class="fas fa-play-circle mr-2"></i> Démarrer le système</button>
     </header>
 
     <div id="warning" class="hidden bg-red-600 text-white p-6 text-center font-bold mx-8 my-6 rounded-lg text-2xl">
@@ -149,19 +149,19 @@ void handleRoot() {
 
     <main class="flex-grow px-8 flex flex-col justify-center items-center">
         <div class="grid grid-cols-1 md:grid-cols-3 gap-12 max-w-screen-lg mx-auto">
-            <div class="station bg-white p-6 space-y-7 rounded-lg shadow-md text-lg" id="station1">
+            <div class="station bg-white p-9 space-y-8 rounded-lg shadow-md text-align" id="station1">
                 <h2 class="font-bold text-xl text-center">Station 1</h2>
                 <p><span class="label"><i class="icon fas fa-lightbulb"></i> LED :</span> <span class="led-state value led-off">⏳ En attente</span></p>
                 <p><span class="label"><i class="icon fas fa-eye"></i> PIR :</span> <span class="pir-state value pir-inactive">🚫 Inactif</span></p>
                 <p><span class="label"><i class="icon fas fa-boxes"></i> Compteur :</span> <span class="counter value counter-style">0</span></p>
             </div>
-            <div class="station bg-white p-6 space-y-7 rounded-lg shadow-md text-lg" id="station2">
+            <div class="station bg-white p-9 space-y-8 rounded-lg shadow-md text-align" id="station2">
                 <h2 class="font-bold text-xl text-center">Station 2</h2>
                 <p><span class="label"><i class="icon fas fa-lightbulb"></i> LED :</span> <span class="led-state value led-off">⏳ En attente</span></p>
                 <p><span class="label"><i class="icon fas fa-eye"></i> PIR :</span> <span class="pir-state value pir-inactive">🚫 Inactif</span></p>
                 <p><span class="label"><i class="icon fas fa-boxes"></i> Compteur :</span> <span class="counter value counter-style">0</span></p>
             </div>
-            <div class="station bg-white p-6 space-y-7 rounded-lg shadow-md text-lg" id="station3">
+            <div class="station bg-white p-9 space-y-8 rounded-lg shadow-md text-align" id="station3">
                 <h2 class="font-bold text-xl text-center">Station 3</h2>
                 <p><span class="label"><i class="icon fas fa-lightbulb"></i> LED :</span> <span class="led-state value led-off">⏳ En attente</span></p>
                 <p><span class="label"><i class="icon fas fa-eye"></i> PIR :</span> <span class="pir-state value pir-inactive">🚫 Inactif</span></p>
@@ -204,7 +204,7 @@ void handleRoot() {
             cntEl.textContent = cntText; // Display the text as is
 
             // Apply warning style if the text indicates low stock
-            if (cntText.includes('presque achevé')) {
+            if (cntText.includes(" !!!")) {
                 cntEl.classList.remove('counter-style');
                 cntEl.classList.add('counter-warning');
             } else {
@@ -222,14 +222,13 @@ void handleRoot() {
                 warnEl.classList.add('hidden'); // Hide banner if no stations are depleted
             } else {
                 let msg;
-                if (depletedStations.length === 3) {
-                    msg = '⚠️ Attention : toutes les stations sont épuisées ! Veuillez recharger avant de continuer.';
-                } else if (depletedStations.length === 1) {
-                    msg = '⚠️ Attention : ' + depletedStations[0] + ' est épuisée ! Veuillez recharger avant de continuer.';
-                } else { // length is 2
-                     // Join the two station names with " et "
-                    msg = '⚠️ Attention : ' + depletedStations.join(' et ') + ' sont épuisées ! Veuillez recharger avant de continuer.';
-                }
+            if (depletedStations.length === 3) {
+                msg = '⚠️ Attention : Toutes les stations sont presque à court de stock ! Veuillez les réapprovisionner immédiatement.';
+            } else if (depletedStations.length === 1) {
+                msg = '⚠️ Attention : Le stock est presque vide dans ' + depletedStations[0] + ' ! Veuillez les réapprovisionner immédiatement.';
+            } else { // length is 2
+                msg = '⚠️ Attention : Le stock est presque vide dans ' + depletedStations.join(' et ') + ' ! Veuillez les réapprovisionner immédiatement.';
+            }
                 warnEl.textContent = msg; // Set the dynamic message
                 warnEl.classList.remove('hidden'); // Show the banner
             }
@@ -301,7 +300,7 @@ void handleStatus() {
 
         // Keep adding the text for JS to detect low stock
         if (displayValues[i] <= 10) {
-            cnt += " - Le produit est presque achevé";
+            cnt += " !!!"; // Add warning text
             depletedStationsList.push_back("\"Station " + String(i+1) + "\""); // Add to list for the banner
         }
 
