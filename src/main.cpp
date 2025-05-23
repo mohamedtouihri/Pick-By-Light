@@ -7,7 +7,6 @@
 // بيانات شبكة WiFi
 #define WIFI_SSID "Wokwi-GUEST" // غيّر هذا إلى اسم شبكتك
 #define WIFI_PASSWORD "" // غيّر هذا إلى كلمة مرور شبكتك
-// لا حاجة لـ WIFI_CHANNEL غالباً
 
 // تعريف أطراف LED RGB (R, G, B)
 const int LEDS[3][3] = {
@@ -33,15 +32,31 @@ TM1637Display displays[3] = {
 };
 
 // القيم الابتدائية للعدادات
-int displayValues[3] = {12, 12, 12}; // يمكن تغيير القيمة الابتدائية هنا
+int displayValues[3] = {3, 3, 3}; // يمكن تغيير القيمة الابتدائية هنا
 
 // تتبع حالات النظام
 bool ledStates[3] = {false, false, false};      // حالة LED أخضر للمحطة (هل يجب أن يكون أخضر؟)
 bool pirLatched[3] = {false, false, false};     // latch لحالة PIR (هل تم اكتشاف حركة منذ آخر إعادة تعيين؟)
 bool handledEvent[3] = {false, false, false};   // لمنع معالجة حدث الحركة أكثر من مرة لكل latch
 bool warningAlerted[3] = {false, false, false}; // لمنع تكرار تشغيل صفارة المخزون المنخفض لنفس المحطة
-bool buzzerState = false;                       // حالة الصفارة (مشغلة فعلياً أم لا)
-unsigned long buzzerEndTime = 0;                // وقت انتهاء تشغيل الصفارة الفعلي
+
+bool systemActive = false;                      // حالة النظام: هل بدأ العمل؟
+
+// NEW: Buzzer state and pattern control
+enum BuzzerMode {
+    BUZZER_OFF,
+    BUZZER_ERROR_CONTINUOUS, // لخطأ الاختيار
+    BUZZER_LOW_STOCK_PULSE   // لتنبيه المخزون المنخفض
+};
+
+BuzzerMode currentBuzzerMode = BUZZER_OFF;
+unsigned long buzzerPatternStartTime = 0; // وقت بدء نمط الصفارة الحالي
+unsigned long buzzerDuration = 0;         // المدة الكلية لعملية تنبيه الصفارة
+
+// فترات نغمة المخزون المنخفض (بالمللي ثانية)
+const unsigned long LOW_STOCK_BUZZ_ON_TIME = 100; // تشغيل الصفارة لمدة 100ms
+const unsigned long LOW_STOCK_BUZZ_OFF_TIME = 100; // إيقاف الصفارة لمدة 100ms
+unsigned long nextBuzzerToggleTime = 0; // الوقت التالي لتبديل حالة الصفارة ضمن النمط
 
 WebServer server(80);
 
@@ -55,27 +70,27 @@ void allLEDsOff() {
         pirLatched[i] = false;      // مسح حالة اللاتش للحركة
         handledEvent[i] = false;    // مسح حالة معالجة الحدث
         // warningAlerted[i] = false; // لا يتم مسح تنبيه المخزون المنخفض إلا عند إعادة تعبئة المنتج (خارج نطاق هذا الكود)
-                                   // إذا أردت مسحه عند كل جولة جديدة، قم بإزالة التعليق عن السطر أعلاه
+                                    // إذا أردت مسحه عند كل جولة جديدة، قم بإزالة التعليق عن السطر أعلاه
     }
     digitalWrite(BUZZER_PIN, LOW); // التأكد من إطفاء الصفارة
-    buzzerState = false;
-    buzzerEndTime = 0;
+    currentBuzzerMode = BUZZER_OFF;
+    buzzerPatternStartTime = 0;
+    buzzerDuration = 0;
+    nextBuzzerToggleTime = 0; // Reset toggle time
 }
 
 // تفعيل LED أخضر لمحطة محددة وإظهار العداد
 void turnGreen(int idx) {
     if (idx < 0 || idx >= 3) return; // تحقق من أن الرقم صالح
     Serial.print("Turning Green: Station ");
-    Serial.println(idx+1);
-    digitalWrite(LEDS[idx][0], LOW); // إطفاء الأحمر
+    Serial.println(idx + 1);
+    digitalWrite(LEDS[idx][0], LOW);    // إطفاء الأحمر
     digitalWrite(LEDS[idx][1], HIGH); // تشغيل الأخضر
-    digitalWrite(LEDS[idx][2], LOW); // إطفاء الأزرق (غير مستخدم)
+    digitalWrite(LEDS[idx][2], LOW);    // إطفاء الأزرق (غير مستخدم)
     ledStates[idx] = true;
-    // يتم تحديث العرض في loop أو عند الحاجة، لكن يمكن عرضه هنا أيضاً عند التفعيل
-    // displays[idx].showNumberDec(displayValues[idx]);
 }
 
-// صفحة HTML رئيسية مع التصميم والتفاعل
+// صفحة HTML رئيسية مع التصميم والتفاعل (سيتم تحديث قسم JavaScript فقط)
 void handleRoot() {
     String html = R"rawliteral(
 <!DOCTYPE html>
@@ -112,7 +127,7 @@ void handleRoot() {
         .buzzer-off { background-color: #e5e7eb; color: #4b5563; } /* Gray */
         .buzzer-attention { background-color: #facc15; color: #854d0e; animation: pulse 1.5s infinite; } /* Yellow/Amber Pulse */
 
-         /* Pulsing animation for Attention buzzer status */
+          /* Pulsing animation for Attention buzzer status */
         @keyframes pulse {
             0% {
                 box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.7);
@@ -198,59 +213,56 @@ void handleRoot() {
             pirEl.className = 'pir-state value ' + (pirVal === 'DETECTED' ? 'pir-active' : 'pir-inactive');
             pirEl.textContent = pirVal === 'DETECTED' ? '👣 Mouvement' : '🚫 Inactif';
 
+
             // Update Counter state and style
             const cntEl = document.querySelector('#station' + i + ' .counter');
-            const cntText = data['DISPLAY' + i]; // This string includes " - Le produit est presque achevé" if low
+            const cntText = data['DISPLAY' + i]; // This string includes " !!!" if low or " ---" if depleted
             cntEl.textContent = cntText; // Display the text as is
 
-            // Apply warning style if the text indicates low stock
-            if (cntText.includes(" !!!")) {
-                cntEl.classList.remove('counter-style');
+            // Apply warning/depleted style
+            if (cntText.includes(" ⚠️")) { // Low stock
+                cntEl.classList.remove('counter-style', 'counter-depleted');
                 cntEl.classList.add('counter-warning');
-            } else {
-                cntEl.classList.remove('counter-warning');
+            } else if (cntText.includes("0")) { // Depleted
+                cntEl.classList.remove('counter-style', 'counter-warning');
+                cntEl.classList.add('counter-depleted'); // NEW class for depleted
+            } else { // Normal
+                cntEl.classList.remove('counter-warning', 'counter-depleted');
                 cntEl.classList.add('counter-style');
             }
         }
 
-        // NEW: Function to update the global warning banner
+        // Function to update the global warning banner
         function updateWarning(data) {
             const warnEl = document.getElementById('warning');
-            const depletedStations = data.DEPLETED_STATIONS || []; // Get the array of depleted station names
+            const warningMessage = data.WARNING_MESSAGE; // Get the combined message
 
-            if (depletedStations.length === 0) {
-                warnEl.classList.add('hidden'); // Hide banner if no stations are depleted
-            } else {
-                let msg;
-            if (depletedStations.length === 3) {
-                msg = '⚠️ Attention : Toutes les stations sont presque à court de stock ! Veuillez les réapprovisionner immédiatement.';
-            } else if (depletedStations.length === 1) {
-                msg = '⚠️ Attention : Le stock est presque vide dans ' + depletedStations[0] + ' ! Veuillez les réapprovisionner immédiatement.';
-            } else { // length is 2
-                msg = '⚠️ Attention : Le stock est presque vide dans ' + depletedStations.join(' et ') + ' ! Veuillez les réapprovisionner immédiatement.';
-            }
-                warnEl.textContent = msg; // Set the dynamic message
+            if (warningMessage && warningMessage !== "") {
+                warnEl.textContent = '⚠️ ' + warningMessage; // Set the dynamic message
                 warnEl.classList.remove('hidden'); // Show the banner
+            } else {
+                warnEl.classList.add('hidden'); // Hide banner if no warning message
             }
         }
 
-        // NEW: Function to update the buzzer UI status based on warnings or actual state
+        // Function to update the buzzer UI status based on warnings or actual state
         function updateBuzzerUI(data) {
             const buzzEl = document.getElementById('buzzerState');
             // Check if any counter is currently showing the warning style (indicating low stock)
+            // or if any counter indicates depleted stock
             const anyCounterWarning = document.querySelectorAll('.counter.counter-warning').length > 0;
+            const anyCounterDepleted = document.querySelectorAll('.counter.counter-depleted').length > 0;
 
-            if (anyCounterWarning) {
-                // If any counter shows warning, set buzzer status to Attention
+            if (anyCounterWarning || anyCounterDepleted) {
+                // If any counter shows warning or depleted, set buzzer status to Attention
                 buzzEl.className = 'value buzzer-attention';
-                buzzEl.textContent = '🔔 Attention !'; // Or any specific warning text
+                buzzEl.textContent = '🔔 Attention !';
             } else {
                 // Otherwise, show the actual buzzer state from the backend
                 buzzEl.className = 'value ' + (data.BUZZER === 'ON' ? 'buzzer-on' : 'buzzer-off');
                 buzzEl.textContent = data.BUZZER === 'ON' ? '🔔 Activé' : '🔕 Éteint';
             }
         }
-
 
         function fetchStatus() {
             fetch('/status')
@@ -287,97 +299,189 @@ void handleRoot() {
 // إرسال الحالة كـ JSON
 void handleStatus() {
     String json = "{";
-    std::vector<String> depletedStationsList;
+    std::vector<String> depletedStationsList; // لقائمة المخزون المستنفد (0)
+    std::vector<String> lowStockStationsList; // لقائمة المخزون شبه المستنفد (<=2 و >0)
 
-    // Build station data (LED, PIR, DISPLAY) and find depleted stations
+    // بناء بيانات المحطات (LED, PIR, DISPLAY) وإيجاد المحطات المستنفدة / ذات المخزون المنخفض
     for (int i = 0; i < 3; i++) {
-        bool greenOn = digitalRead(LEDS[i][1]) == HIGH;
-        bool redOn   = digitalRead(LEDS[i][0]) == HIGH;
-        String led = greenOn ? "Green" : (redOn ? "Red" : "En attente");
-        // حالة PIR تعتمد على pirLatched للدلالة على اكتشاف حركة منذ آخر إعادة تعيين
-        String pir = pirLatched[i] ? "DETECTED" : "NONE";
-        String cnt = String(displayValues[i]);
+        String led;
+        String pir;
 
-        // Keep adding the text for JS to detect low stock
-        if (displayValues[i] <= 10) {
-            cnt += " !!!"; // Add warning text
-            depletedStationsList.push_back("\"Station " + String(i+1) + "\""); // Add to list for the banner
+        if (systemActive) {
+            bool greenOn = digitalRead(LEDS[i][1]) == HIGH;
+            bool redOn   = digitalRead(LEDS[i][0]) == HIGH;
+            led = greenOn ? "Green" : (redOn ? "Red" : "Waiting");
+            pir = pirLatched[i] ? "DETECTED" : "NONE";
+        } else {
+            led = "Waiting";
+            pir = "NONE";
         }
 
-        json += "\"LED" + String(i+1) + "\":\"" + led + "\",";
-        json += "\"PIR" + String(i+1) + "\":\"" + pir + "\",";
-        json += "\"DISPLAY" + String(i+1) + "\":\"" + cnt + "\""; // Enclose string in quotes
+        String cnt = String(displayValues[i]);
+
+        if (displayValues[i] == 0) {
+            cnt = "0";
+            depletedStationsList.push_back(String(i + 1));
+        } else if (displayValues[i] <= 2) {
+            cnt += " ⚠️";
+            lowStockStationsList.push_back(String(i + 1));
+        }
+
+        json += "\"LED" + String(i + 1) + "\":\"" + led + "\",";
+        json += "\"PIR" + String(i + 1) + "\":\"" + pir + "\",";
+        json += "\"DISPLAY" + String(i + 1) + "\":\"" + cnt + "\"";
         if (i < 2) json += ",";
     }
 
-    // Add DEPLETED_STATIONS array to JSON
-    json += ",\"DEPLETED_STATIONS\":[";
-    for(size_t i = 0; i < depletedStationsList.size(); ++i) {
-        json += depletedStationsList[i];
-        if (i < depletedStationsList.size() - 1) json += ",";
+    String warningMessage = "";
+
+    if (!depletedStationsList.empty()) {
+        warningMessage += "Station" + String(depletedStationsList.size() > 1 ? "s " : " ");
+        for (size_t i = 0; i < depletedStationsList.size(); ++i) {
+            warningMessage += depletedStationsList[i];
+            if (depletedStationsList.size() > 1) {
+                if (i < depletedStationsList.size() - 2) {
+                    warningMessage += ", ";
+                } else if (i == depletedStationsList.size() - 2) {
+                    warningMessage += " et ";
+                }
+            }
+        }
+        warningMessage += " : Stock épuisé."; // تمت إزالة المسافة الزائدة هنا
     }
-    json += "]";
 
-    // Add BUZZER state to JSON
-    json += ",\"BUZZER\":\"" + String(buzzerState ? "ON" : "OFF") + "\""; // Add buzzer state
+    if (!lowStockStationsList.empty()) {
+        if (!warningMessage.isEmpty()) {
+            // *** هذا هو التغيير الرئيسي لإضافة فاصل جذاب ***
+            warningMessage += " --- 🚨 --- "; // فاصل باستخدام رمز تعبيري
+        }
+        warningMessage += "Station" + String(lowStockStationsList.size() > 1 ? "s " : " ");
+        for (size_t i = 0; i < lowStockStationsList.size(); ++i) {
+            warningMessage += lowStockStationsList[i];
+            if (lowStockStationsList.size() > 1) {
+                if (i < lowStockStationsList.size() - 2) {
+                    warningMessage += ", ";
+                } else if (i == lowStockStationsList.size() - 2) {
+                    warningMessage += " et ";
+                }
+            }
+        }
+        warningMessage += " : Stock presque épuisé.";
+    }
 
-    json += "}"; // Close JSON object
+    if (!warningMessage.isEmpty()) {
+        warningMessage += " Merci de recharger.";
+    }
+
+    json += ",\"WARNING_MESSAGE\":\"" + warningMessage + "\"";
+    json += ",\"BUZZER\":\"" + String((systemActive && currentBuzzerMode != BUZZER_OFF) ? "ON" : "OFF") + "\"";
+    json += "}";
     server.send(200, "application/json", json);
 }
-
 // اختيار محطتين عشوائيًا وبدء الجولة
 void handleRandomize() {
-    allLEDsOff(); // إعادة تعيين كل شيء أولاً (عدا حالة warningAlerted إذا لم تغيرها allLEDsOff)
+    allLEDsOff(); // إعادة تعيين كل شيء أولاً
+    systemActive = true; // تفعيل النظام عند بدء الجولة
 
-    std::vector<int> idxs = {0, 1, 2};
-    // خلط المتجهات عشوائياً (Fisher-Yates Shuffle)
-    for (int i = idxs.size() - 1; i > 0; i--) {
-        int j = random(0, i + 1);
-        std::swap(idxs[i], idxs[j]); // استخدم std::swap
+    std::vector<int> availableStations;
+    for (int i = 0; i < 3; ++i) {
+        if (displayValues[i] > 0) { // Only consider stations with stock > 0
+            availableStations.push_back(i);
+        }
     }
 
-    // اختيار أول عنصرين لتشغيل الضوء الأخضر فيهما (يجب أن تكون محطات مختلفة الآن)
-    turnGreen(idxs[0]);
-    turnGreen(idxs[1]);
-    // المحطة الثالثة (idxs[2]) ستبقى بحالة "En attente"
+    if (availableStations.empty()) {
+        Serial.println("No stations available with stock > 0 to randomize.");
+        server.send(200, "text/plain", "Randomization complete. No stations have stock to pick from.");
+        return;
+    }
 
-    Serial.print("LEDs ON: Station ");
-    Serial.print(idxs[0]+1);
-    Serial.print(" & Station ");
-    Serial.println(idxs[1]+1);
+    // خلط المتجهات عشوائياً (Fisher-Yates Shuffle)
+    for (int i = availableStations.size() - 1; i > 0; i--) {
+        int j = random(0, i + 1);
+        std::swap(availableStations[i], availableStations[j]); // استخدم std::swap
+    }
 
-    server.send(200, "text/plain", "Randomization complete. Stations " + String(idxs[0]+1) + " and " + String(idxs[1]+1) + " are green.");
+    // اختيار عدد المحطات التي ستضيء بالأخضر عشوائياً
+    // Ensure we don't try to pick more stations than available
+    int numStationsToTurnGreen = random(1, std::min((int)availableStations.size() + 1, 3)); // will return 1 or 2, but not more than available stations
+
+    Serial.print("Randomizing: Turning GREEN for ");
+    Serial.print(numStationsToTurnGreen);
+    Serial.println(" station(s).");
+
+    String activatedStations = "";
+    for (int i = 0; i < numStationsToTurnGreen; ++i) {
+        turnGreen(availableStations[i]);
+        activatedStations += (String)(availableStations[i] + 1);
+        if (i < numStationsToTurnGreen - 1) {
+            activatedStations += " & ";
+        }
+    }
+
+    if (numStationsToTurnGreen == 0) {
+        Serial.println("No stations turned green.");
+        server.send(200, "text/plain", "Randomization complete. No stations turned green.");
+    } else {
+        Serial.print("LEDs ON: Station ");
+        Serial.println(activatedStations);
+        server.send(200, "text/plain", "Randomization complete. Station(s) " + activatedStations + " are green.");
+    }
 }
 
+// NEW: دالة للتحكم في نمط الصفارة
+void handleBuzzerPattern(unsigned long now) {
+    if (currentBuzzerMode == BUZZER_OFF) return; // لا تفعل شيئًا إذا كانت الصفارة مطفأة
+
+    // إيقاف الصفارة تمامًا إذا انتهت مدة النمط الكلية
+    if (now >= buzzerPatternStartTime + buzzerDuration) {
+        digitalWrite(BUZZER_PIN, LOW);
+        currentBuzzerMode = BUZZER_OFF;
+        Serial.println("Buzzer pattern ended.");
+        return;
+    }
+
+    // منطق تشغيل/إيقاف الصفارة بناءً على النمط المحدد
+    if (currentBuzzerMode == BUZZER_ERROR_CONTINUOUS) {
+        digitalWrite(BUZZER_PIN, HIGH); // تشغيل مستمر
+    } else if (currentBuzzerMode == BUZZER_LOW_STOCK_PULSE) {
+        if (now >= nextBuzzerToggleTime) {
+            // تبديل حالة الصفارة (تشغيل -> إيقاف، إيقاف -> تشغيل)
+            if (digitalRead(BUZZER_PIN) == LOW) {
+                digitalWrite(BUZZER_PIN, HIGH);
+                nextBuzzerToggleTime = now + LOW_STOCK_BUZZ_ON_TIME;
+            } else {
+                digitalWrite(BUZZER_PIN, LOW);
+                nextBuzzerToggleTime = now + LOW_STOCK_BUZZ_OFF_TIME;
+            }
+        }
+    }
+}
 
 void setup() {
     Serial.begin(115200);
     // تهيئة البذور العشوائية بشكل جيد
     randomSeed(analogRead(0));
-    // يمكن أيضاً استخدام الوقت إذا كان متوفراً من NTP
 
     // تهيئة الأطراف والحالات الابتدائية
     for (int i = 0; i < 3; i++) {
         for (int c = 0; c < 3; c++) pinMode(LEDS[i][c], OUTPUT);
-        pinMode(PIR_PINS[i], INPUT); // PIR pins as input
-        // PIR GPIOs 34, 35, 36, 39 are Input Only on ESP32, no need for pinMode(..., INPUT) if using digitalRead correctly.
-        // However, explicitly setting INPUT mode is good practice for clarity and compatibility.
+        pinMode(PIR_PINS[i], INPUT);
         displays[i].setBrightness(0x0f); // تعيين أقصى سطوع
-        displays[i].showNumberDec(displayValues[i]);
+        displays[i].showNumberDec(displayValues[i]); // Show initial counter values
         pirLatched[i] = false;
         handledEvent[i] = false;
-        warningAlerted[i] = false; // Initialize the new flag
+        warningAlerted[i] = false;
     }
     pinMode(BUZZER_PIN, OUTPUT); // Buzzer pin as output
     digitalWrite(BUZZER_PIN, LOW); // Ensure buzzer is off initially
 
     allLEDsOff(); // التأكد من أن جميع الـ LEDs والصفارة مطفأة في البداية
+    systemActive = false; // النظام يبدأ غير نشط
 
     Serial.print("Connecting to ");
     Serial.println(WIFI_SSID);
-    //WiFi.begin(WIFI_SSID, WIFI_PASSWORD, WIFI_CHANNEL); // Channel is often not needed
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
 
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
@@ -390,7 +494,7 @@ void setup() {
     // إعداد معالجات طلبات الويب
     server.on("/", handleRoot);
     server.on("/status", handleStatus);
-    server.on("/randomize", handleRandomize); // ربط مسار /randomize بالدالة المخصصة
+    server.on("/randomize", handleRandomize);
 
     server.begin(); // بدء تشغيل خادم الويب
     Serial.println("HTTP server started");
@@ -400,89 +504,110 @@ void loop() {
     unsigned long now = millis(); // الحصول على الوقت الحالي
     server.handleClient(); // معالجة طلبات خادم الويب باستمرار
 
-    // حلقة لمعالجة كل محطة على حدة
+    // تحديث شاشات العدادات بغض النظر عن حالة النظام
     for (int i = 0; i < 3; i++) {
-        // اقرأ حالة حساس PIR للمحطة الحالية
-        bool pir = digitalRead(PIR_PINS[i]) == HIGH;
+        displays[i].showNumberDec(displayValues[i]);
+    }
 
-        // منطق PIR latch: إذا تم اكتشاف حركة (pir == true) ولم يتم تسجيلها بعد (!pirLatched[i])، قم بتثبيت الحالة
-        // هذا يضمن أن حدث الحركة القصير يتم التقاطه ومعالجته مرة واحدة.
-        if (pir && !pirLatched[i]) {
-            pirLatched[i] = true;
-            Serial.print("Motion detected on Station ");
-            Serial.println(i+1);
-        }
+    // كل منطق تفاعل الحساسات والأضواء والصفارة يعمل فقط إذا كان النظام نشطاً
+    if (systemActive) {
+        // حلقة لمعالجة كل محطة على حدة
+        for (int i = 0; i < 3; i++) {
+            // **NEW: Check if counter is 0 for this station**
+            if (displayValues[i] == 0) {
+                // If counter is 0, turn off LEDs and reset PIR states for this station
+                for (int c = 0; c < 3; c++) digitalWrite(LEDS[i][c], LOW); // Turn off all LEDs
+                ledStates[i] = false; // Ensure LED state is false
+                pirLatched[i] = false; // Reset PIR latch
+                handledEvent[i] = false; // Reset handled event
+                // Do NOT return here, continue to check other stations.
+                continue; // Skip the rest of the loop for this station if depleted
+            }
 
-        // معالجة الحدث فقط إذا تم تثبيت PIR (pirLatched[i] == true) ولم يتم التعامل معه بعد (!handledEvent[i])
-        if (pirLatched[i] && !handledEvent[i]) {
-            // تحقق مما إذا كان الضوء أخضر (اختيار صحيح متوقع لهذه المحطة)
-            if (ledStates[i]) { // الشرط ledStates[i] == true هو نفسه ledStates[i]
-                // **** إجراءات الالتقاط الصحيح ****
-                displayValues[i]--; // إنقاص العداد
-                displays[i].showNumberDec(displayValues[i]); // عرض القيمة الجديدة على شاشة TM1637
-                Serial.print("Correct pick on Station ");
-                Serial.print(i+1);
-                Serial.print(". Counter is now: ");
-                Serial.println(displayValues[i]);
+            // اقرأ حالة حساس PIR للمحطة الحالية
+            bool pir = digitalRead(PIR_PINS[i]) == HIGH;
 
-                // ** NEW: تشغيل الصفارة إذا أصبح المخزون منخفضًا (<= 10) ولم يتم التنبيه له من قبل **
-                // يتم تشغيل هذا التنبيه فقط مرة واحدة لكل محطة بعد انخفاض العداد إلى 10 أو أقل
-                if (displayValues[i] <= 10 && !warningAlerted[i]) {
-                     Serial.print("Low stock condition met for Station ");
-                     Serial.println(i+1);
-                    if (!buzzerState) { // تشغيل الصفارة فقط إذا لم تكن مشغلة بالفعل من تنبيه آخر
-                        Serial.println("Triggering low stock buzzer (3s)");
-                        digitalWrite(BUZZER_PIN, HIGH);
-                        buzzerState = true;
-                        buzzerEndTime = now + 3000; // تشغيل الصفارة لمدة 3 ثوانٍ كما هو مطلوب للتنبيه
-                    } else {
-                        Serial.println("Buzzer already ON, extending timer if needed.");
-                        // يمكن اختيار تمديد الوقت إذا كانت الصفارة مشغلة بالفعل
-                        // buzzerEndTime = max(buzzerEndTime, now + 3000);
+            // منطق PIR latch: إذا تم اكتشاف حركة (pir == true) ولم يتم تسجيلها بعد (!pirLatched[i])، قم بتثبيت الحالة
+            if (pir && !pirLatched[i]) {
+                pirLatched[i] = true;
+                Serial.print("Motion detected on Station ");
+                Serial.println(i + 1);
+            }
+
+            // معالجة الحدث فقط إذا تم تثبيت PIR (pirLatched[i] == true) ولم يتم التعامل معه بعد (!handledEvent[i])
+            if (pirLatched[i] && !handledEvent[i]) {
+                // تحقق مما إذا كان الضوء أخضر (اختيار صحيح متوقع لهذه المحطة)
+                if (ledStates[i]) {
+                    // **** إجراءات الالتقاط الصحيح ****
+                    displayValues[i]--; // إنقاص العداد
+                    Serial.print("Correct pick on Station ");
+                    Serial.print(i + 1);
+                    Serial.print(". Counter is now: ");
+                    Serial.println(displayValues[i]);
+
+                    // تشغيل الصفارة إذا أصبح المخزون منخفضًا (<= 10) ولم يتم التنبيه له من قبل
+                    // أو إذا أصبح 0 ولم يتم التنبيه له
+                    if (displayValues[i] <= 10 && !warningAlerted[i]) {
+                        Serial.print("Low stock/Depleted condition met for Station ");
+                        Serial.println(i + 1);
+                        // تفعيل نمط المخزون المنخفض/النفاد
+                        currentBuzzerMode = BUZZER_LOW_STOCK_PULSE;
+                        buzzerPatternStartTime = now;
+                        buzzerDuration = 3000; // تنبيه لمدة 3 ثوانٍ
+                        nextBuzzerToggleTime = now + LOW_STOCK_BUZZ_ON_TIME; // أول تبديل
+                        Serial.println("Triggering low stock/depleted pulsed buzzer (3s)");
+                        warningAlerted[i] = true; // تم وضع علامة على المحطة بأنها أطلقت تنبيه
+                    } else if (displayValues[i] == 0 && !warningAlerted[i]) { // Specific check for 0 if not already caught by <=10
+                        Serial.print("Stock depleted on Station ");
+                        Serial.println(i + 1);
+                        currentBuzzerMode = BUZZER_LOW_STOCK_PULSE; // Use same pulse for depleted
+                        buzzerPatternStartTime = now;
+                        buzzerDuration = 3000;
+                        nextBuzzerToggleTime = now + LOW_STOCK_BUZZ_ON_TIME;
+                        Serial.println("Triggering depleted stock pulsed buzzer (3s)");
+                        warningAlerted[i] = true;
                     }
-                    warningAlerted[i] = true; // تم وضع علامة على المحطة بأنها أطلقت تنبيه المخزون المنخفض
+
+
+                    handledEvent[i] = true; // تم التعامل مع حدث الحركة هذا بنجاح (اختيار صحيح)
                 }
+                // إذا لم يكن الضوء أخضر (اختيار خاطئ)
+                else {
+                    // **** إجراءات الالتقاط الخاطئ ****
+                    Serial.print("Incorrect pick on Station ");
+                    Serial.println(i + 1);
+                    // تشغيل المصباح الأحمر
+                    digitalWrite(LEDS[i][0], HIGH); // أحمر HIGH
+                    digitalWrite(LEDS[i][1], LOW);  // أخضر LOW
+                    digitalWrite(LEDS[i][2], LOW);  // أزرق LOW
 
-                handledEvent[i] = true; // تم التعامل مع حدث الحركة هذا بنجاح (اختيار صحيح)
-            }
-            // إذا لم يكن الضوء أخضر (اختيار خاطئ)
-            else {
-                // **** إجراءات الالتقاط الخاطئ ****
-                Serial.print("Incorrect pick on Station ");
-                Serial.println(i+1);
-                // تشغيل المصباح الأحمر (إذا لم يكن مشتعل بالفعل)
-                // تأكد من إطفاء الأخضر والأزرق
-                digitalWrite(LEDS[i][0], HIGH); // أحمر HIGH
-                digitalWrite(LEDS[i][1], LOW);  // أخضر LOW
-                digitalWrite(LEDS[i][2], LOW);  // أزرق LOW
+                    // تفعيل نمط الخطأ المستمر
+                    currentBuzzerMode = BUZZER_ERROR_CONTINUOUS;
+                    buzzerPatternStartTime = now;
+                    buzzerDuration = 3000; // تنبيه لمدة 3 ثوانٍ
+                    Serial.println("Triggering incorrect pick continuous buzzer (3s)");
 
-                // تشغيل الصفارة (إذا لم تكن مشغلة بالفعل)
-                if (!buzzerState) {
-                     Serial.println("Triggering incorrect pick buzzer (3s)");
-                     digitalWrite(BUZZER_PIN, HIGH);
-                     buzzerState = true;
-                     buzzerEndTime = now + 3000; // تشغيل الصفارة لمدة 3 ثوانٍ لتنبيه الخطأ
-                } else {
-                    Serial.println("Buzzer already ON, extending timer if needed.");
-                    // يمكن اختيار تمديد الوقت إذا كانت الصفارة مشغلة بالفعل
-                    // buzzerEndTime = max(buzzerEndTime, now + 3000);
+                    handledEvent[i] = true; // تم التعامل مع حدث الحركة هذا بنجاح (اختيار خاطئ)
                 }
-
-                handledEvent[i] = true; // تم التعامل مع حدث الحركة هذا بنجاح (اختيار خاطئ)
             }
         }
-        // ملاحظة: إعادة تعيين pirLatched و handledEvent يتم عند بدء جولة عشوائية جديدة (دالة allLEDsOff)
-        // إعادة تعيين warningAlerted يتم أيضاً في allLEDsOff إذا قمت بإزالة التعليق عن السطر
-    }
+        // معالجة نمط الصفارة الحالي
+        handleBuzzerPattern(now);
 
-    // إيقاف الصفارة بعد انتهاء مدتها المحددة
-    if (buzzerState && now >= buzzerEndTime) {
-        Serial.println("Buzzer timer ended, turning OFF.");
+    } else { // System is NOT active
+        // التأكد من أن جميع الـ LEDs مطفأة والصفارة مطفأة عندما يكون النظام غير نشط
+        for (int i = 0; i < 3; i++) {
+            for (int c = 0; c < 3; c++) digitalWrite(LEDS[i][c], LOW);
+            pirLatched[i] = false;
+            handledEvent[i] = false;
+        }
         digitalWrite(BUZZER_PIN, LOW);
-        buzzerState = false;
-        buzzerEndTime = 0; // إعادة تعيين وقت الانتهاء
+        currentBuzzerMode = BUZZER_OFF; // التأكد من إطفاء الصفارة
+        buzzerPatternStartTime = 0;
+        buzzerDuration = 0;
+        nextBuzzerToggleTime = 0;
     }
 
-    // تأخير بسيط لمنع انهيار النظام (اختياري لكن موصى به)
+    // تأخير بسيط لمنع انهيار النظام
     delay(10);
 }
